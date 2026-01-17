@@ -191,7 +191,6 @@ void setup() {
 }
 
 void loop() {
-  delay(10);
   SlaveState currentState = LISTEN;
   int32_t timer_start_time = millis();
   while (1) {
