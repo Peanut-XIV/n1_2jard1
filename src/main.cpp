@@ -1,15 +1,31 @@
 #include <Arduino.h>
+#include <esp_sleep.h>
 #include <Wire.h>
-#include <NimBLEDevice.h>
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <DFRobot_OxygenSensor.h>
 
 #define MAX_TIMEOUT_COUNT 3
-#define DFR_OXY_ADDR 0x73
+#define DFR_OXY_ADDR 0x76
+#define BME_280_ADDR 0x77
+
+// SERVICE AND CHARACTERISTIC UUIDs -----
+#define SENSOR_SERVICE_UUID "A870DC1B-0265-4D5F-9A21-8AC5BD2BACD7"
+#define TEMP_CHARACTERISTIC_UUID "A07038DF-7C8E-4914-87B3-131B91DAAB73"
+#define PRES_CHARACTERISTIC_UUID "594BF212-A4FC-4130-ACB1-8FD4FD28EFD3"
+#define HUMID_CHARACTERISTIC_UUID "72A7B435-989D-4369-8F58-D6E98B4AB262"
+#define OXY_CHARACTERISTIC_UUID "759E38A8-BB58-4F70-96EB-A4BDCEC3977A"
+
+#define SLEEP_TIME_SERVICE_UUID "9D818D7B-A445-46F5-8A3F-B9F86EA5DE2F"
+#define SLEEP_TIME_CHARACTERISTIC_UUID "CEF11275-083B-4027-AD0E-0DDB904278A5"
 
 #ifndef DEVICE_ID
-  #define DEVICE_ID "1"
+  #define DEVICE_ID "default"
 #endif
 #define DEVICE_NAME "EnvSensor"
 
@@ -25,7 +41,7 @@
 typedef enum {
   LISTEN,
   SEND_DATA,
-  SLEEP,
+  PREPARE_SLEEP,
   BROKEN_LINK
 } SlaveState;
 
@@ -33,24 +49,80 @@ typedef enum {
 Adafruit_BME280 bme; // I2C
 DFRobot_OxygenSensor o2sensor; // I2C
 
-// BLE SERVER OBJECT --------------------
-static NimBLEServer* pServer = nullptr;
-static NimBLECharacteristic* pTempCharacteristic = nullptr;
-static NimBLECharacteristic* pHumidCharacteristic = nullptr;
-static NimBLECharacteristic* pOxyCharacteristic = nullptr;
-
-RTC_DATA_ATTR int TIMEOUT_COUNTER = 0;
-RTC_DATA_ATTR int PROVIDED_SLEEP_DURATION = 1800000; // default is 30 minutes in milliseconds
-
+// GLOBALS ------------------------------
+float humidity = -1;
+float temperature = -1;
+float pressure = -1;
+float oxygen = -1;
 bool has_oxy_sensor = false; // Assume false; set true if O2 sensor is present
 
-// FUNCTION PROTOTYPES -------------------
+bool temp_accessed = false;
+bool humid_accessed = false;
+bool oxy_accessed = false;
+bool sleep_time_accessed = false;
+bool BLE_device_connected = false;
+
+// PERSISTENT STATE ---------------------
+RTC_DATA_ATTR int TIMEOUT_COUNTER = 0;
+RTC_DATA_ATTR int64_t PROVIDED_SLEEP_DURATION = 30 * 60 * 1000 * 1000; // default is 30 minutes in µ-seconds
+
+// FUNCTION PROTOTYPES ------------------
 void init_BLE();
-bool temp_accessed();
-bool humid_accessed();
-bool oxy_accessed();
-bool sleep_time_accessed();
-bool BLE_connection_established();
+
+// BLUETOOTH OBJECTS --------------------
+BLEServer *pServer = nullptr;
+
+BLEService *pSensingService = nullptr;
+BLECharacteristic *pTempCharacteristic = nullptr;
+BLECharacteristic *pHumidCharacteristic = nullptr;
+BLECharacteristic *pPressCharacteristic = nullptr;
+BLECharacteristic *pOxyCharacteristic = nullptr;
+
+BLEService *pSleepTimeService = nullptr;
+BLECharacteristic *pSleepTimeCharacteristic = nullptr;
+
+BLEAdvertising *pAdvert = nullptr;
+BLEAdvertisementData *pAdvData = nullptr;
+
+// BLUETOOTH CALLBACKS ------------------
+class ServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer *serverPointer) {
+    BLE_device_connected = true;
+    DEBUG_PRINTLN("[BLE] device connected!");
+  }
+
+  void onDisconnect(BLEServer *serverPointer) {
+    BLE_device_connected = false;
+    DEBUG_PRINTLN("[BLE] device disconnected!");
+  }
+};
+
+class SensorCallbacks: public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic *characteristicPointer) {
+    if (characteristicPointer == pTempCharacteristic) {
+      temp_accessed = true;
+      DEBUG_PRINTLN("[BLE] Temperature Accessed");
+    }
+    else if (characteristicPointer == pHumidCharacteristic) {
+      humid_accessed = true;
+      DEBUG_PRINTLN("[BLE] Humidity Accessed");
+    }
+    else if (characteristicPointer == pOxyCharacteristic) {
+      oxy_accessed = true;
+      DEBUG_PRINTLN("[BLE] Cx Oxygen Accessed");
+    } else {
+      DEBUG_PRINT("[BLE] Accessed unidentified characteristic with UUID: ");
+      const char *uuid = characteristicPointer->getUUID().toString().c_str();
+      DEBUG_PRINTLN(uuid);
+    }
+  }
+};
+
+class SleepTimeCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristicPointer) {
+    sleep_time_accessed = true;
+  }
+};
 
 
 void setup() {
@@ -63,76 +135,87 @@ void setup() {
   # endif
 
   DEBUG_PRINTLN("Starting up...");
-  DEBUG_PRINTLN("WIP");
-  Serial.println("after debug");
 
   // init I2C as master
   DEBUG_PRINTLN("Initializing I2C...");
-  // TODO: Set correct SDA and SCL pins
   if (!Wire.begin()) {
-    DEBUG_PRINTLN("Failed to initialize I2C bus!");
+    DEBUG_PRINTLN("[I2C] Failed to initialize I2C bus!");
   }
 
   // init BME280 sensor
   DEBUG_PRINTLN("[I2C] Connecting to temperature and humidity sensor...");
-  if (!bme.begin(0x76)) {  
-    DEBUG_PRINTLN("Could not find a valid BME280 sensor.");
+  if (!bme.begin(BME_280_ADDR)) {  
+    DEBUG_PRINTLN("[I2C] Could not find a valid BME280 sensor.");
   } else {
-    DEBUG_PRINTLN("BME280 sensor connected.");
+    DEBUG_PRINTLN("[I2C] BME280 sensor connected.");
+    humidity = bme.readHumidity();  // % of humidity
+    temperature = bme.readTemperature();  // Celcius
+    pressure = bme.readPressure(); // Pascals
   }
   
-  // init check all 4 possible addresses
+  // init
   DEBUG_PRINTLN("[I2C] Connecting to oxygen sensor...");
-  for (int i = 0; i < 4; i++) {
-    if (o2sensor.begin(ADDRESS_0 + i)) {
-      # ifdef DEBUG
-        DEBUG_PRINT("Oxygen sensor found at ADDRESS_");
-        DEBUG_PRINTLN(i);
-        DEBUG_PRINTLN("Oxygen sensor connected.");
-        o2sensor.calibrate(20.9); // Calibrate at 20.9% O2
-        float cx = o2sensor.getOxygenData(10); // Preload some data
-        DEBUG_PRINT("Oxygen concentration: ");
-        DEBUG_PRINTLN(cx);
-      # endif
-      has_oxy_sensor = true;
-    }
+  if (o2sensor.begin(DFR_OXY_ADDR)) {
+    oxygen = o2sensor.getOxygenData(10); // Preload some data
+    has_oxy_sensor = true;
   }
   if (!has_oxy_sensor) {
-    DEBUG_PRINTLN("Oxygen sensor not found.");
+    DEBUG_PRINTLN("[I2C] Oxygen sensor not found.");
   }
 
   // init BLE server
-  DEBUG_PRINTLN("Initializing BLE...");
+  DEBUG_PRINTLN("Setting up BLE...");
+  init_BLE();
 
-  // create BLE environmental sensing service
-    // create BLE temperature characteristic
-    // create BLE humidity characteristic
-    // create BLE oxygen characteristic
+  DEBUG_PRINTLN("[BLE] Loading characteristic values...");
+  pTempCharacteristic->setValue(temperature);
+  pHumidCharacteristic->setValue(humidity);
+  pPressCharacteristic->setValue(pressure);
+  pOxyCharacteristic->setValue(oxygen);
 
-  // start BLE service
-  // start advertising
-  // TODO: remember to set device name with the same value as local name
+  DEBUG_PRINTLN("[BLE] Starting Server...");
+  pSensingService->start();
+  pSleepTimeService->start();
+
+  DEBUG_PRINTLN("[BLE] Starting advertising...");
+  pAdvert = BLEDevice::getAdvertising();
+  pAdvData = new BLEAdvertisementData();
+  pAdvData->setName(DEVICE_NAME "_" DEVICE_ID);
+  pAdvData->setShortName("S_" DEVICE_ID);
+  pAdvert->setAdvertisementData(*pAdvData);
+  pAdvert->addServiceUUID(SENSOR_SERVICE_UUID);
+
+  pAdvert->setScanResponse(true);
+  pAdvert->setMinPreferred(0x06);
+  pAdvert->setMinPreferred(0x12);
+
+  BLEDevice::startAdvertising();
+
+  DEBUG_PRINTLN("--- Finished setup !!! ---");
 }
 
 void loop() {
-  delay(1000);
-  DEBUG_PRINTLN("LOOP");
+  delay(10);
   SlaveState currentState = LISTEN;
   int32_t timer_start_time = millis();
-  /*
   while (1) {
     switch(currentState) {
       case LISTEN:
         // Check for timeout
         if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) { // Example timeout
           TIMEOUT_COUNTER++;
+          DEBUG_PRINT("[LISTEN] TIMEOUT_COUNTER = ");
+          DEBUG_PRINTLN(TIMEOUT_COUNTER);
           timer_start_time = millis();
         }
         // Check for incoming BLE requests
-        if(BLE_connection_established()) {
+        if(BLE_device_connected) {
+          DEBUG_PRINTLN("[LISTEN] Device detected, awaiting data retreival...");
           currentState = SEND_DATA;
           TIMEOUT_COUNTER = 0; // Reset on successful access
+          BLEDevice::stopAdvertising();
         } else if (TIMEOUT_COUNTER >= MAX_TIMEOUT_COUNT) {
+          DEBUG_PRINTLN("[LISTEN] Too many timeouts, shutting down indefinitely...");
           currentState = BROKEN_LINK;
         }
         break;
@@ -140,37 +223,47 @@ void loop() {
       case SEND_DATA:
         if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) { // Example timeout
           TIMEOUT_COUNTER++;
+          DEBUG_PRINT("[SEND_DATA] TIMEOUT_COUNTER = ");
+          DEBUG_PRINTLN(TIMEOUT_COUNTER);
           timer_start_time = millis();
         }
-        if (temp_accessed() && humid_accessed() && (!has_oxy_sensor || oxy_accessed())) {
+        if (temp_accessed && humid_accessed && (!has_oxy_sensor || oxy_accessed)) {
+          DEBUG_PRINTLN("[SEND_DATA] All the data was read.");
           TIMEOUT_COUNTER = 0; // Reset on successful access
-          currentState = SLEEP;
+          currentState = PREPARE_SLEEP;
         } else if (TIMEOUT_COUNTER >= MAX_TIMEOUT_COUNT) {
+          DEBUG_PRINTLN("[SEND_DATA] Too many timeouts, shutting down indefinitely...");
           currentState = BROKEN_LINK;
         }
         break;
 
-      case SLEEP:
-        if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) { // Example timeout
+      case PREPARE_SLEEP:
+        if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) {
           TIMEOUT_COUNTER++;
+          DEBUG_PRINT("[PREPARE_SLEEP] TIMEOUT_COUNTER = ");
+          DEBUG_PRINTLN(TIMEOUT_COUNTER);
           timer_start_time = millis();
         }
 
-        if (sleep_time_accessed()) {
+        if (sleep_time_accessed) {
+          DEBUG_PRINTLN("[PREPARE_SLEEP] Sleep duration written");
           TIMEOUT_COUNTER = 0; // Reset on successful access
-          // Prepare for deep sleep
-          // set sleep duration
-          // enter deep sleep
+          const char *string_value = pSleepTimeCharacteristic->getValue().c_str();
+          uint64_t sleep_duration = strtoull(string_value, NULL, 10);
+
+          pSensingService->stop();
+          pSleepTimeService->stop();
+
+          esp_deep_sleep(sleep_duration);
         } else if (TIMEOUT_COUNTER >= MAX_TIMEOUT_COUNT) {
+          DEBUG_PRINTLN("[PREPARE_SLEEP] Too many timeouts, shutting down indefinitely...");
           currentState = BROKEN_LINK;
         }
         break;
 
       case BROKEN_LINK:
-        // Handle broken link scenario
-        // Reset TIMEOUT_COUNTER
         TIMEOUT_COUNTER = 0;
-        // shutdown ESP32
+        esp_deep_sleep_start();
         break;
 
       default:
@@ -178,13 +271,37 @@ void loop() {
         break;
     }
   }
-  */
 }
+
 
 void init_BLE() {
   // Initialize BLE server and characteristics
-  NimBLEDevice::init(DEVICE_NAME "_" DEVICE_ID);
-  pServer = NimBLEDevice::createServer();
+  DEBUG_PRINTLN("[BLE] Initializing BLE Device");
+  BLEDevice::init(DEVICE_NAME "_" DEVICE_ID);
+  DEBUG_PRINTLN("[BLE] Creating Server...");
+  pServer = BLEDevice::createServer();
+  DEBUG_PRINTLN("[BLE] Adding server callbacks...");
+  pServer->setCallbacks(new ServerCallbacks());
+  DEBUG_PRINTLN("[BLE] Creating sensor service...");
+  pSensingService = pServer->createService(SENSOR_SERVICE_UUID);
 
-  BLEService *pEnvSensorService = pServer->createService("181A"); // Environmental Sensing Service UUID
+  DEBUG_PRINTLN("[BLE] Creating sensor characteristics...");
+  pTempCharacteristic = pSensingService->createCharacteristic(TEMP_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+  pHumidCharacteristic = pSensingService->createCharacteristic(HUMID_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+  pOxyCharacteristic = pSensingService->createCharacteristic(OXY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+  pPressCharacteristic = pSensingService->createCharacteristic(PRES_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ);
+  
+  DEBUG_PRINTLN("[BLE] Adding sensor callbacks...");
+  pTempCharacteristic->setCallbacks(new SensorCallbacks());
+  pHumidCharacteristic->setCallbacks(new SensorCallbacks());
+  pOxyCharacteristic->setCallbacks(new SensorCallbacks());
+  // No Pressure characteristic Callback because not relevant
+
+  DEBUG_PRINTLN("[BLE] Creating sleep time service...");
+  pSleepTimeService = pServer->createService(SLEEP_TIME_SERVICE_UUID);
+  DEBUG_PRINTLN("[BLE] Creating sleep time characteristic...");
+  pSleepTimeCharacteristic = pSleepTimeService->createCharacteristic(SLEEP_TIME_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+
+
+  DEBUG_PRINTLN("[BLE] Finished initializing.");
 }
