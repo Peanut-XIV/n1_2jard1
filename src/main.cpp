@@ -201,7 +201,6 @@ void loop() {
   while (1) {
     switch(currentState) {
       case LISTEN:
-        DEBUG_PRINTLN("[LISTEN]");
         // Check for timeout
         if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) { // Example timeout
           TIMEOUT_COUNTER++;
