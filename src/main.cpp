@@ -181,6 +181,7 @@ void setup() {
   pAdvData->setShortName("S_" DEVICE_ID);
   // pAdvData->addServiceUUID(BLEUUID(SENSOR_SERVICE_UUID));
   pAdvData->setCompleteServices(BLEUUID(SENSOR_SERVICE_UUID));
+  //cc,rc
   pAdvert->setAdvertisementData(*pAdvData);
   pAdvert->addServiceUUID(SENSOR_SERVICE_UUID);
 
