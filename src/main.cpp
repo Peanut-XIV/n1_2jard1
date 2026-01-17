@@ -64,7 +64,7 @@ bool BLE_device_connected = false;
 
 // PERSISTENT STATE ---------------------
 RTC_DATA_ATTR int TIMEOUT_COUNTER = 0;
-RTC_DATA_ATTR int64_t PROVIDED_SLEEP_DURATION = 30 * 60 * 1000 * 1000; // default is 30 minutes in µ-seconds
+RTC_DATA_ATTR uint64_t PROVIDED_SLEEP_DURATION = 30 * 60 * 1000 * 1000; // default is 30 minutes in µ-seconds
 
 // FUNCTION PROTOTYPES ------------------
 void init_BLE();
@@ -135,7 +135,6 @@ void setup() {
   # endif
 
   DEBUG_PRINTLN("Starting up...");
-
   // init I2C as master
   DEBUG_PRINTLN("Initializing I2C...");
   if (!Wire.begin()) {
@@ -249,12 +248,17 @@ void loop() {
           DEBUG_PRINTLN("[PREPARE_SLEEP] Sleep duration written");
           TIMEOUT_COUNTER = 0; // Reset on successful access
           const char *string_value = pSleepTimeCharacteristic->getValue().c_str();
-          uint64_t sleep_duration = strtoull(string_value, NULL, 10);
+          uint64_t sleep_duration = (uint64_t)strtoull(string_value, NULL, 16);
+          DEBUG_PRINT("sleep time value ");
+          DEBUG_PRINTLN(sleep_duration);
 
           pSensingService->stop();
           pSleepTimeService->stop();
+          
+          BLEDevice::deinit();
 
-          esp_deep_sleep(sleep_duration);
+          esp_sleep_enable_timer_wakeup(sleep_duration);
+          esp_deep_sleep_start();
         } else if (TIMEOUT_COUNTER >= MAX_TIMEOUT_COUNT) {
           DEBUG_PRINTLN("[PREPARE_SLEEP] Too many timeouts, shutting down indefinitely...");
           currentState = BROKEN_LINK;
