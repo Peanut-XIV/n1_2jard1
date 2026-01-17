@@ -50,10 +50,10 @@ Adafruit_BME280 bme; // I2C
 DFRobot_OxygenSensor o2sensor; // I2C
 
 // GLOBALS ------------------------------
-float humidity = -1;
-float temperature = -1;
-float pressure = -1;
-float oxygen = -1;
+float humidity = NAN;
+float temperature = NAN;
+float pressure = NAN;
+float oxygen = NAN;
 bool has_oxy_sensor = false; // Assume false; set true if O2 sensor is present
 
 bool temp_accessed = false;
