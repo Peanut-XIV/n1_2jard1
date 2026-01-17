@@ -155,7 +155,7 @@ void setup() {
   
   // init
   DEBUG_PRINTLN("[I2C] Connecting to oxygen sensor...");
-  if (o2sensor.begin(DFR_OXY_ADDR)) {
+  if (o2sensor.begin(ADDRESS_3)) {
     oxygen = o2sensor.getOxygenData(10); // Preload some data
     has_oxy_sensor = true;
   }
@@ -201,6 +201,7 @@ void loop() {
   while (1) {
     switch(currentState) {
       case LISTEN:
+        DEBUG_PRINTLN("[LISTEN]");
         // Check for timeout
         if (millis() - timer_start_time > PROVIDED_SLEEP_DURATION) { // Example timeout
           TIMEOUT_COUNTER++;
@@ -301,7 +302,7 @@ void init_BLE() {
   pSleepTimeService = pServer->createService(SLEEP_TIME_SERVICE_UUID);
   DEBUG_PRINTLN("[BLE] Creating sleep time characteristic...");
   pSleepTimeCharacteristic = pSleepTimeService->createCharacteristic(SLEEP_TIME_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
-
+  pSleepTimeCharacteristic->setCallbacks(new SleepTimeCallbacks());
 
   DEBUG_PRINTLN("[BLE] Finished initializing.");
 }
