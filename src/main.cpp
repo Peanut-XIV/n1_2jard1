@@ -175,21 +175,12 @@ void setup() {
   pSleepTimeService->start();
 
   DEBUG_PRINTLN("[BLE] Starting advertising...");
-  pAdvert = BLEDevice::getAdvertising();
-  pAdvData = new BLEAdvertisementData();
-  pAdvData->setName(DEVICE_NAME "_" DEVICE_ID);
-  pAdvData->setShortName("S_" DEVICE_ID);
-  // pAdvData->addServiceUUID(BLEUUID(SENSOR_SERVICE_UUID));
-  pAdvData->setCompleteServices(BLEUUID(SENSOR_SERVICE_UUID));
-  //cc,rc
-  pAdvert->setAdvertisementData(*pAdvData);
+  pAdvert = pServer->getAdvertising();
   pAdvert->addServiceUUID(SENSOR_SERVICE_UUID);
-
   pAdvert->setScanResponse(true);
   pAdvert->setMinPreferred(0x06);
   pAdvert->setMinPreferred(0x12);
-
-  BLEDevice::startAdvertising();
+  pAdvert->start();
 
   DEBUG_PRINTLN("--- Finished setup !!! ---");
 }
